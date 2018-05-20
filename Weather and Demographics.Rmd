@@ -1,0 +1,150 @@
+---
+title: "Weather and Demographics"
+author: "Kangxin Bao - kb2900"
+date: "December 11, 2017"
+output: 
+  html_document:
+    keep_md: true
+    self_contained: true
+---
+
+### 1.Data Acquistion and Preparation
+
+```{r, message=FALSE, warning=FALSE}
+# data from us census
+library(tidyr)
+library(dplyr)
+uscensus <- read.csv("DEC_00_SF1_DP1/DEC_00_SF1_DP1_with_ann.csv", header = TRUE)[, 3:53]
+uscensus <-  uscensus %>% 
+  separate(Geography, into = c("Cities", "States"), sep = ", ")
+
+library(stringr)
+uscensus$Cities <- gsub(" city", "", uscensus$Cities, fixed=TRUE)
+uscensus$Cities <- gsub(" (balance)", "", uscensus$Cities, fixed=TRUE)
+uscensus$Cities <- gsub("-Davidson", "", uscensus$Cities, fixed=TRUE)
+colnames(uscensus) <- str_replace(colnames(uscensus), ".Total.population...SEX.AND.AGE...","")
+```
+
+```{r, message=FALSE, warning=FALSE}
+# data from 50states website
+library(httr)
+library(rvest)
+library(xml2)
+url <- "https://www.50states.com/abbreviations.htm"
+
+state <- read_html(url)
+state_text <- html_nodes(state, "td") %>%
+  html_text()
+
+state_df <- as.data.frame(matrix(state_text, nrow = 65, ncol = 2, byrow = T))
+colnames(state_df) <- c("States", "States_Abb")
+uscensus <- left_join(uscensus, state_df, by = "States")
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+# data from Weather Underground API
+citylist <- str_replace(uscensus$Cities, " ", "_")
+statelist <- as.character(uscensus$States_Abb)
+
+GetWeatherInfo <- function(city, state){
+  url <- paste0("http://api.wunderground.com/api/781b41f91352ee19/conditions/q", "/",
+state, "/", city, ".json")
+  
+  r <- GET(url)
+  http_status(r)
+  df <- content(r, as = "parsed")
+  
+  data <- c(city, state, df$current_observation$observation_time, df$current_observation$weather,
+            df$current_observation$temperature_string, df$current_observation$wind_string,
+            df$current_observation$wind_dir, df$current_observation$precip_today_string)
+  return(data)
+}
+
+weather <- data.frame(matrix(NA, nrow = 50, ncol = 8))
+for (i in 1:50){
+  city <- citylist[i]
+  state <- statelist[i]
+  weather[i, ] <- GetWeatherInfo(city, state)
+  Sys.sleep(10)
+}
+colnames(weather) <- c("city", "state", "obstime", "weather", "temperature", "wind", "wind_dir", "precipitation")
+weather$temperature_F <- weather$temperature %>% str_extract("\\d+\\.*\\d*") %>% as.numeric
+weather$city <- str_replace(weather$city, "_", " ")
+```
+
+### 2.Data Cleaning
+
+```{r, message=FALSE, warning=FALSE}
+# for all cities
+library(tidyverse)
+citydata <- uscensus %>%
+  left_join(weather, by = c("Cities" = "city")) %>%
+  select(Cities, States, States_Abb, Number..Total.population, Number.Median.age..years., 
+         Number.Male, Percent.Male, Number.Female, Percent.Female, 
+         Number.Under.5.years, Percent.Under.5.years,
+         Number.65.years.and.over, Percent.65.years.and.over,
+         weather, temperature_F, wind) %>%
+  arrange(desc(Number..Total.population))
+save(citydata, file="city_demoinfo.Rda")
+
+```
+
+```{r}
+# function for select cities or states
+select_city_state <- function(city=NULL, state.abb=NULL){
+  if ((!is.null(city)) && (!is.null(state.abb))){
+    data <- citydata %>% filter(Cities == city & States_Abb == state.abb)
+  } else if ((is.null(city)) && (!is.null(state.abb))){
+    data <-  citydata %>% filter(States_Abb == state.abb)
+  } else if ((!is.null(city)) && (is.null(state.abb))){
+    data <-  citydata %>% filter(Cities == city)
+  } else
+    print("Error: at least one argument.")
+  return(data)
+}
+select_city_state(state.abb = "CA")
+
+```
+```{r, message=FALSE, warning=FALSE}
+# function for running a model              
+fit_reg <- function(dv, iv, df, intercept=TRUE) {
+  if((is.numeric(dv)) && (intercept=TRUE)){
+    lm <- lm(dv ~ iv, data = df) 
+  }else if((is.numeric(dv)) && (intercept=FALSE)){
+    lm <- lm(dv ~ iv - 1, data = df) 
+  }else{
+    print("Error: wrong data type.")
+  }
+  return(summary(lm))
+}
+
+fit_reg(citydata$Number.Under.5.years, citydata$temperature_F, citydata)
+```
+
+```{r, message=FALSE, warning=FALSE}
+# function for calculate sex ratio             
+sex_age_ratio <- function(sex=TRUE, age=TRUE) {
+  stopifnot(is.logical(sex), is.logical(age))
+  
+  if((isTRUE(sex)) && (isTRUE(age))){
+    ratio <- citydata %>%
+      mutate(Sex_ratio = Number.Male/Number.Female*100,
+             Age_ratio = Percent.65.years.and.over) %>%
+      select(Cities, States, States_Abb, Sex_ratio, Age_ratio)
+    
+  }else if((isTRUE(sex)) && (!isTRUE(age))){
+    ratio <- citydata %>%
+      mutate(Sex_ratio = Number.Male/Number.Female*100) %>%
+      select(Cities, States, States_Abb, Sex_ratio)
+    
+  }else if((!isTRUE(sex)) && (isTRUE(age))){
+    ratio <- citydata %>%
+      mutate(Age_ratio = Percent.65.years.and.over) %>%
+      select(Cities, States, States_Abb, Age_ratio)
+  }
+  return(ratio)
+}
+
+sex_age_ratio(sex = T, age = F)
+```
